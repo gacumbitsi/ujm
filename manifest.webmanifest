@@ -1,0 +1,17 @@
+{
+  "id": "./",
+  "name": "Listen",
+  "short_name": "Listen",
+  "description": "Play your own audio, podcasts and openly licensed recordings, even with the screen locked.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#101116",
+  "theme_color": "#101116",
+  "categories": ["music", "entertainment"],
+  "icons": [
+    {"src":"icon-192.png","sizes":"192x192","type":"image/png","purpose":"any"},
+    {"src":"icon-512.png","sizes":"512x512","type":"image/png","purpose":"any"},
+    {"src":"icon-512.png","sizes":"512x512","type":"image/png","purpose":"maskable"}
+  ]
+}
