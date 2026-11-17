@@ -16,7 +16,7 @@
 :root{color-scheme:dark;--bg:#101116;--panel:#1b1d25;--line:#30323c;--muted:#a4a6b2;--red:#ff3344}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:#fff;font:16px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;-webkit-text-size-adjust:100%}
-main{max-width:680px;margin:auto;padding:calc(22px + env(safe-area-inset-top)) 18px 200px}
+main{max-width:680px;margin:auto;padding:calc(22px + env(safe-area-inset-top)) 18px 280px}
 h1{font-size:23px;margin:8px 0 4px}
 .sub,small{color:var(--muted);font-size:13px}
 button{border:0;color:#fff;cursor:pointer;font:inherit;font-weight:700;background:none;-webkit-tap-highlight-color:transparent}
@@ -49,6 +49,11 @@ input[type=range]{width:100%;accent-color:var(--red);margin:8px 0 2px;height:28p
 .ctl button{font-size:15px;padding:10px 12px;border-radius:12px;min-width:46px}
 .ctl .play{background:var(--red);font-size:20px;width:58px;height:58px;border-radius:50%;padding:0}
 .ctl button:disabled{opacity:.35}
+.pbar{display:flex;gap:10px;margin:10px 0}.pbar .btn{flex:1}
+.ctl.sec{margin-top:2px;gap:4px}
+.ctl.sec button{font-size:12px;color:var(--muted);padding:8px 6px;min-width:0;flex:1}
+.ctl.sec button[aria-pressed=true]{color:#fff;background:var(--red)}
+#qpanel{max-height:38vh;overflow:auto;margin-bottom:8px;border-bottom:1px solid var(--line);padding-bottom:6px}
 [hidden]{display:none!important}
 </style>
 </head>
@@ -87,16 +92,23 @@ input[type=range]{width:100%;accent-color:var(--red);margin:8px 0 2px;height:28p
 </main>
 
 <div class="bar" id="bar" hidden><div>
+  <div id="qpanel" hidden></div>
   <div class="t" id="nowTitle"></div><small id="nowSub"></small>
   <input type="range" id="seek" min="0" max="0" value="0" step="1" aria-label="Seek">
   <div class="times"><span id="cur">0:00</span><span id="dur">0:00</span></div>
   <div class="ctl">
-    <button id="speed" aria-label="Playback speed">1×</button>
     <button id="prev" aria-label="Previous">⏮</button>
     <button id="back" aria-label="Back 15 seconds">−15</button>
     <button class="play" id="pp" aria-label="Play">▶</button>
     <button id="fwd" aria-label="Forward 30 seconds">+30</button>
     <button id="next" aria-label="Next">⏭</button>
+  </div>
+  <div class="ctl sec">
+    <button id="shuf" aria-pressed="false">Shuffle</button>
+    <button id="rep" aria-pressed="false">Repeat: off</button>
+    <button id="speed" aria-label="Playback speed">1×</button>
+    <button id="sleep" aria-pressed="false">Sleep</button>
+    <button id="qbtn" aria-pressed="false">Queue</button>
   </div>
 </div></div>
 <audio id="audio" preload="metadata"></audio>
@@ -129,7 +141,7 @@ const delBlob = id => idb('readwrite', s => s.delete(id));
 let lib = store.get('listen-lib', []);
 let feeds = store.get('listen-feeds', []);
 let pos = store.get('listen-pos', {});
-let queue = [], qi = -1, objUrl = null, activeFeed = null, episodes = [];
+let queue = [], base = [], qi = -1, objUrl = null, activeFeed = null, episodes = [];
 const audio = $('audio');
 const keyOf = t => t.id || t.src;
 
@@ -156,7 +168,7 @@ async function playQueue(list, i){
   $('bar').hidden = false; $('nowTitle').textContent = t.title; $('nowSub').textContent = t.artist || '';
   setMedia(t); renderAll();
 }
-const step = d => { const n = qi + d; if (n >= 0 && n < queue.length) { savePos(); playQueue(queue, n) } };
+const step = d => { let n = qi + d; if (n < 0 || n >= queue.length){ if (repeat !== 'all') return; n = (n + queue.length) % queue.length } savePos(); playQueue(queue, n) };
 const toggle = () => audio.paused ? audio.play().catch(() => {}) : audio.pause();
 
 const rates = [1, 1.25, 1.5, 2, 0.75]; let ri = store.get('listen-rate', 0);
@@ -179,9 +191,15 @@ audio.onloadedmetadata = audio.ondurationchange = () => { $('seek').max = Math.f
 let lastSave = 0;
 audio.ontimeupdate = () => {
   if (!scrubbing){ $('seek').value = Math.floor(audio.currentTime); $('cur').textContent = fmt(audio.currentTime) }
+  if (sleepAt && Date.now() >= sleepAt){ audio.pause(); setSleep(0) }
   if (Date.now() - lastSave > 5000){ lastSave = Date.now(); savePos(); posState() }
 };
-audio.onended = () => { const t = queue[qi]; if (t){ delete pos[keyOf(t)]; store.set('listen-pos', pos) } qi < queue.length - 1 ? step(1) : renderAll() };
+audio.onended = () => {
+  const t = queue[qi]; if (t){ delete pos[keyOf(t)]; store.set('listen-pos', pos) }
+  if (sleepEnd){ setSleep(0); renderAll(); return }
+  if (repeat === 'one'){ audio.currentTime = 0; audio.play().catch(() => {}); return }
+  qi < queue.length - 1 || repeat === 'all' ? step(1) : renderAll();
+};
 audio.onerror = () => { $('libMsg').textContent = $('podMsg').textContent = 'This audio could not be played. The file may be missing, or the source may block playback.' };
 function savePos(){
   const t = queue[qi]; if (!t || !audio.duration) return;
@@ -192,6 +210,52 @@ function savePos(){
 }
 document.addEventListener('visibilitychange', () => { if (document.hidden) savePos() });
 addEventListener('pagehide', savePos);
+
+/* ---------- shuffle, repeat, sleep, queue ---------- */
+let shuffle = store.get('listen-shuffle', false), repeat = store.get('listen-repeat', 'off');
+const shuf = a => { a = [...a]; for (let i = a.length - 1; i > 0; i--){ const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]] } return a };
+function startList(list, i, force){
+  if (force !== undefined) setShuffle(force, true);
+  base = list;
+  if (shuffle){ queue = [list[i], ...shuf(list.filter((_, k) => k !== i))]; playQueue(queue, 0) }
+  else { queue = [...list]; playQueue(queue, i) }
+}
+function setShuffle(on, quiet){
+  shuffle = on; store.set('listen-shuffle', on); $('shuf').setAttribute('aria-pressed', on);
+  if (!quiet && queue[qi]){
+    const cur = queue[qi];
+    if (on){ queue = [cur, ...shuf(base.filter(t => t !== cur))]; qi = 0 } else { queue = [...base]; qi = Math.max(0, queue.indexOf(cur)) }
+    renderQueue();
+  }
+}
+const REP = ['off', 'all', 'one'];
+function setRepeat(r){ repeat = r; store.set('listen-repeat', r); $('rep').textContent = 'Repeat: ' + r; $('rep').setAttribute('aria-pressed', r !== 'off') }
+const SLEEP = [0, 15, 30, 45, 60, 'end']; let si = 0, sleepAt = 0, sleepEnd = false;
+function setSleep(i){
+  si = i; const v = SLEEP[i]; sleepEnd = v === 'end'; sleepAt = typeof v === 'number' && v ? Date.now() + v * 60000 : 0;
+  $('sleep').textContent = !v ? 'Sleep' : v === 'end' ? 'Sleep: end' : 'Sleep: ' + v + 'm'; $('sleep').setAttribute('aria-pressed', !!v);
+}
+function renderQueue(){
+  const p = $('qpanel'); p.replaceChildren(); if (p.hidden) return;
+  p.append(el('div', { className: 'h', textContent: 'Up next' }));
+  queue.forEach((t, i) => {
+    const m = el('button', { className: 'meta', type: 'button' }, el('strong', { textContent: t.title }), el('small', { textContent: i === qi ? 'Playing' : t.artist || '' }));
+    m.onclick = () => { savePos(); playQueue(queue, i) };
+    const r = el('div', { className: 'row' + (i === qi ? ' active' : '') }, m);
+    if (i !== qi) r.append(iconBtn('×', 'Remove from queue', () => { queue.splice(i, 1); if (i < qi) qi--; renderQueue() }));
+    p.append(r);
+  });
+}
+$('shuf').onclick = () => setShuffle(!shuffle);
+$('rep').onclick = () => setRepeat(REP[(REP.indexOf(repeat) + 1) % 3]);
+$('sleep').onclick = () => setSleep((si + 1) % SLEEP.length);
+$('qbtn').onclick = () => { $('qpanel').hidden = !$('qpanel').hidden; $('qbtn').setAttribute('aria-pressed', !$('qpanel').hidden); renderQueue() };
+const playBar = list => {
+  const a = el('button', { className: 'btn', type: 'button', textContent: '▶ Play all' }), b = el('button', { className: 'btn alt', type: 'button', textContent: 'Shuffle' });
+  a.onclick = () => startList(list, 0, false);
+  b.onclick = () => startList(list, Math.floor(Math.random() * list.length), true);
+  return el('div', { className: 'pbar' }, a, b);
+};
 
 /* ---------- lock screen / notification controls ---------- */
 function setMedia(t){
@@ -215,7 +279,7 @@ function row(t, list, i, extra){
   const act = queue[qi] && keyOf(queue[qi]) === keyOf(t);
   const m = el('button', { className: 'meta', type: 'button' }, el('strong', { textContent: t.title }),
     el('small', { textContent: [t.artist, pos[keyOf(t)] ? 'Resume at ' + fmt(pos[keyOf(t)]) : t.dur || ''].filter(Boolean).join(' · ') }));
-  m.onclick = () => playQueue(list, i);
+  m.onclick = () => startList(list, i);
   const r = el('div', { className: 'row' + (act ? ' active' : '') }, m);
   (extra || []).forEach(x => r.append(x)); return r;
 }
@@ -224,10 +288,11 @@ const iconBtn = (txt, label, fn) => { const b = el('button', { className: 'ic', 
 function renderLib(){
   const box = $('libList'); box.replaceChildren();
   if (!lib.length){ box.append(el('div', { className: 'empty', innerHTML: '<b>Your library is empty</b>Add audio files from your phone, or save episodes and free recordings from the other tabs.' })); return }
+  box.append(playBar(lib));
   lib.forEach((t, i) => box.append(row(t, lib, i, [iconBtn('×', 'Remove ' + t.title, async () => {
     lib = lib.filter(x => x !== t); if (t.id) await delBlob(t.id); store.set('listen-lib', lib); renderAll() })])));
 }
-const renderAll = () => { renderLib(); renderFeeds(); renderEps(); if (lastResults) renderResults() };
+const renderAll = () => { renderQueue(); renderLib(); renderFeeds(); renderEps(); if (lastResults) renderResults() };
 const saveLib = (t, msgEl) => {
   if (lib.some(x => (x.src && x.src === t.src))) { msgEl.textContent = 'Already in your library.'; return }
   lib.unshift(t); store.set('listen-lib', lib); msgEl.textContent = 'Added to your library.'; renderLib();
@@ -295,6 +360,7 @@ function renderFeeds(){
 function renderEps(){
   const box = $('eps'); box.replaceChildren(); if (!activeFeed || !episodes.length) return;
   box.append(el('div', { className: 'h', textContent: activeFeed.title }));
+  box.append(playBar(episodes));
   episodes.forEach((t, i) => box.append(row(t, episodes, i, [iconBtn('＋', 'Save to library', () => saveLib(t, $('podMsg')))])));
 }
 
@@ -339,9 +405,11 @@ async function openItem(d, creator){
 }
 function showTracks(title, list){
   const box = $('results'); box.replaceChildren(el('div', { className: 'h' }, title, (() => { const b = el('button', { type: 'button', textContent: '← Back' }); b.onclick = renderResults; return b })()));
+  box.append(playBar(list));
   list.forEach((t, i) => box.append(row(t, list, i, [iconBtn('＋', 'Save to library', () => saveLib(t, $('findMsg')))])));
 }
 
+setShuffle(shuffle, true); setRepeat(repeat); setSleep(0);
 renderAll();
 if ('serviceWorker' in navigator) addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(() => {}));
 </script>
